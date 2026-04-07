@@ -28,6 +28,8 @@ app.add_middleware(
         "http://127.0.0.1:5500",
         "https://сапфиров.рф",
         "https://www.сапфиров.рф",
+        "https://xn--80aerydhd0a.xn--p1ai",
+        "https://www.xn--80aerydhd0a.xn--p1ai",
     ],
     allow_credentials=True,
     allow_methods=["*"],
