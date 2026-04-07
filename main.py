@@ -27,6 +27,7 @@ app.add_middleware(
         "http://localhost:5500",
         "http://127.0.0.1:5500",
         "https://сапфиров.рф",
+        "https://www.сапфиров.рф",
     ],
     allow_credentials=True,
     allow_methods=["*"],
