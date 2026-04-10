@@ -339,7 +339,13 @@ def safe_parse_json(text: str):
     return json.loads(normalize_json_text(text))
 
 
-def call_deepseek(messages):
+DEEPSEEK_TIMEOUT_SHORT = 25
+DEEPSEEK_TIMEOUT_LONG = 120
+DEEPSEEK_MAX_TOKENS_SHORT = 900
+DEEPSEEK_MAX_TOKENS_LONG = 2500
+
+
+def call_deepseek(messages, timeout=DEEPSEEK_TIMEOUT_SHORT, max_tokens=DEEPSEEK_MAX_TOKENS_SHORT):
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
@@ -348,8 +354,9 @@ def call_deepseek(messages):
         "model": "deepseek-chat",
         "messages": messages,
         "temperature": 0.1,
+        "max_tokens": max_tokens,
     }
-    response = requests.post(DEEPSEEK_URL, headers=headers, json=payload, timeout=60)
+    response = requests.post(DEEPSEEK_URL, headers=headers, json=payload, timeout=timeout)
     response.raise_for_status()
     data = response.json()
     return data["choices"][0]["message"]["content"]
@@ -369,7 +376,11 @@ def extract_fields(user_message: str, current_answers: dict) -> dict:
             ),
         },
     ]
-    raw = call_deepseek(messages)
+    raw = call_deepseek(
+        messages,
+        timeout=DEEPSEEK_TIMEOUT_SHORT,
+        max_tokens=DEEPSEEK_MAX_TOKENS_SHORT,
+    )
     parsed = safe_parse_json(raw)
     return sanitize_extracted(parsed)
 
@@ -1022,7 +1033,11 @@ def generate_legal_analysis_with_cta(answers: dict, plan: dict) -> str:
         {"role": "user", "content": prompt}
     ]
     try:
-        analysis = call_deepseek(messages)
+        analysis = call_deepseek(
+            messages,
+            timeout=DEEPSEEK_TIMEOUT_LONG,
+            max_tokens=DEEPSEEK_MAX_TOKENS_LONG,
+        )
         if len(analysis) > 3500:
             cut_point = analysis.rfind('.', 0, 3500)
             if cut_point == -1:
