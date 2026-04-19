@@ -29,7 +29,7 @@ app.add_middleware(
         "https://сапфиров.рф",
         "https://www.сапфиров.рф",
         "https://xn--80aerydhd0a.xn--p1ai",
-        "https://www.xn--80aerydhd0a.xn--p1ai",
+        "https://www.xn--80aerydhd0a.xn--p1ai"
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -42,17 +42,15 @@ DEEPSEEK_URL = "https://api.deepseek.com/v1/chat/completions"
 if not DEEPSEEK_API_KEY:
     raise RuntimeError("DEEPSEEK_API_KEY not found in .env")
 
-# Настройка SMTP (Mail.ru) – данные берутся из .env
 SMTP_HOST = "smtp.mail.ru"
 SMTP_PORT = 465
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-SMTP_TO = SMTP_USER  # можно заменить на другой ящик, если нужно
+SMTP_TO = SMTP_USER
 
 if not SMTP_USER or not SMTP_PASSWORD:
     raise RuntimeError("SMTP_USER or SMTP_PASSWORD not found in .env")
 
-# Настройка логирования
 LOG_DIR = "logs"
 os.makedirs(LOG_DIR, exist_ok=True)
 
@@ -84,16 +82,13 @@ def log_lead(data: dict):
     lead_logger.info(json.dumps(record, ensure_ascii=False))
 
 def send_email_lead(payload: dict):
-    """Отправка заявки на email через SMTP Mail.ru"""
     subject = f"Заявка из бота: {payload.get('case_family', 'unknown')}"
     body = payload.get("message", "Нет текста")
-    
     msg = MIMEMultipart()
     msg["From"] = SMTP_USER
     msg["To"] = SMTP_TO
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain", "utf-8"))
-    
     try:
         with smtplib.SMTP_SSL(SMTP_HOST, SMTP_PORT) as server:
             server.login(SMTP_USER, SMTP_PASSWORD)
@@ -139,19 +134,13 @@ ALLOWED_CASE_FAMILY = {
 }
 ALLOWED_CONSULTATION_MODE = {"two_paths", "one_path_plus_check", "document_first", "clarify_first", "reject", "unknown"}
 
-STEP_ORDER = ["raw_user_problem", "location_description", "cadastral_number_optional", "land_rights", "contact"]
-
 QUESTION_TEXTS = {
-    "raw_user_problem": "Кратко опишите проблему по недвижимости: что за объект, в чём юридическая сложность и какая цель.",
-    "location_description": "Где находится объект? Можно в свободной форме: область, район, город, СНТ, деревня или адрес.",
-    "cadastral_number_optional": "Если есть кадастровый номер — пришлите. Если нет, так и напишите: «нет».",
-    "land_rights": "Есть ли у вас правоустанавливающие документы на земельный участок? (в собственности, аренда, нет документов)",
-    "contact": "Я уже понимаю ситуацию – здесь, скорее всего, потребуется судебное узаконивание. Могу оценить шансы и сказать, как пройти без сноса. Пришлите телефон или Telegram – разберу точнее.",
+    "contact": "Если хотите точный разбор по документам, оставьте телефон. После этого можно будет перейти к следующему шагу: кадастровый номер, выписка ЕГРН, техплан или другие документы по объекту.",
+    "email_address": "Укажите ваш email, чтобы я отправил полный разбор:",
 }
 
 sessions = {}
 MAX_CLARIFICATION_ATTEMPTS = 1
-MAX_STEP_ATTEMPTS = 2
 
 EXTRACTION_PROMPT = """
 Ты извлекаешь структурированные данные из сообщения клиента по юридическим вопросам, связанным с недвижимостью.
@@ -210,7 +199,6 @@ bank_or_transaction_context: bank_refusal, sale_blocked, deal_risk, inspection_r
 cadastral_status: provided, absent, unknown, not_applicable
 """.strip()
 
-
 def empty_answers():
     return {
         "raw_user_problem": None,
@@ -233,8 +221,8 @@ def empty_answers():
         "property_rights_status": None,
         "land_rights_status": None,
         "bank_or_transaction_context": None,
+        "construction_date": None,
     }
-
 
 def empty_consultation_plan():
     return {
@@ -248,7 +236,6 @@ def empty_consultation_plan():
         "request_contact_after_reply": False,
     }
 
-
 def new_session():
     return {
         "state": "intake",
@@ -260,11 +247,11 @@ def new_session():
         "answers": empty_answers(),
         "consultation_plan": empty_consultation_plan(),
         "final_payload": {},
-        "step_attempts": {},
         "finished": False,
         "nontarget_issued": False,
+        "last_question": None,
+        "preliminary_sent": False,
     }
-
 
 def normalize_str(value):
     if value is None:
@@ -272,13 +259,11 @@ def normalize_str(value):
     value = str(value).strip()
     return value or None
 
-
 def normalize_enum(value, allowed, default="unknown"):
     value = normalize_str(value)
     if not value:
         return None
     return value if value in allowed else default
-
 
 def normalize_documents(value):
     if value is None:
@@ -300,7 +285,6 @@ def normalize_documents(value):
             seen.add(item)
             unique.append(item)
     return unique
-
 
 def sanitize_extracted(data):
     data = data or {}
@@ -327,25 +311,16 @@ def sanitize_extracted(data):
         "bank_or_transaction_context": normalize_enum(data.get("bank_or_transaction_context"), ALLOWED_CONTEXT),
     }
 
-
 def normalize_json_text(text: str) -> str:
     text = text.strip()
     if text.startswith("```"):
         text = text.replace("```json", "").replace("```", "").strip()
     return text
 
-
 def safe_parse_json(text: str):
     return json.loads(normalize_json_text(text))
 
-
-DEEPSEEK_TIMEOUT_SHORT = 25
-DEEPSEEK_TIMEOUT_LONG = 120
-DEEPSEEK_MAX_TOKENS_SHORT = 900
-DEEPSEEK_MAX_TOKENS_LONG = 2500
-
-
-def call_deepseek(messages, timeout=DEEPSEEK_TIMEOUT_SHORT, max_tokens=DEEPSEEK_MAX_TOKENS_SHORT):
+def call_deepseek(messages, timeout=25, max_tokens=1200):
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
         "Content-Type": "application/json",
@@ -356,11 +331,15 @@ def call_deepseek(messages, timeout=DEEPSEEK_TIMEOUT_SHORT, max_tokens=DEEPSEEK_
         "temperature": 0.1,
         "max_tokens": max_tokens,
     }
-    response = requests.post(DEEPSEEK_URL, headers=headers, json=payload, timeout=timeout)
-    response.raise_for_status()
-    data = response.json()
-    return data["choices"][0]["message"]["content"]
-
+    try:
+        response = requests.post(DEEPSEEK_URL, headers=headers, json=payload, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"]
+    except requests.exceptions.Timeout:
+        raise TimeoutError(f"DeepSeek API timeout after {timeout} seconds")
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"DeepSeek request failed: {str(e)}")
 
 def extract_fields(user_message: str, current_answers: dict) -> dict:
     messages = [
@@ -376,18 +355,12 @@ def extract_fields(user_message: str, current_answers: dict) -> dict:
             ),
         },
     ]
-    raw = call_deepseek(
-        messages,
-        timeout=DEEPSEEK_TIMEOUT_SHORT,
-        max_tokens=DEEPSEEK_MAX_TOKENS_SHORT,
-    )
+    raw = call_deepseek(messages, timeout=20, max_tokens=700)
     parsed = safe_parse_json(raw)
     return sanitize_extracted(parsed)
 
-
 def merge_answers(existing: dict, extracted: dict) -> dict:
     merged = deepcopy(existing)
-
     for key, value in extracted.items():
         if key == "documents":
             if value:
@@ -403,24 +376,19 @@ def merge_answers(existing: dict, extracted: dict) -> dict:
                             unique.append(item)
                     merged["documents"] = unique
             continue
-
         if value is None:
             continue
-
         if key in {"raw_user_problem", "normalized_problem", "location_description"}:
             if merged[key] is None:
                 merged[key] = value
             elif len(value) > len(merged[key]):
                 merged[key] = value
             continue
-
         if merged[key] is None:
             merged[key] = value
         elif merged[key] == "unknown" and value != "unknown":
             merged[key] = value
-
     return merged
-
 
 def looks_like_real_estate(answers: dict) -> bool:
     text = " ".join(
@@ -434,18 +402,22 @@ def looks_like_real_estate(answers: dict) -> bool:
             answers.get("cadastral_number") or "",
         ]
     ).lower()
-
     non_target_patterns = [
         "собака", "кошка", "животн", "сосед", "шум", "запах", "ремонт телевизор", "медиаплеер",
         "бытовая техника", "рецепт", "суп", "каша", "стирка", "уборка", "игрушка", "живу в квартире"
     ]
+    real_estate_keywords = [
+        "межевание", "граница участка", "сосед залез", "забор", "смежный участок",
+        "наложение границ", "границы не совпадают", "долевая собственность", "второй собственник",
+        "лицевой счет", "коммуналка", "не платит коммуналку"
+    ]
+    if any(k in text for k in real_estate_keywords):
+        return True
     if any(p in text for p in non_target_patterns):
         return False
-
     strong_legal = ["банк", "росреестр", "залог", "отказ", "кредит", "экспертиз", "суд", "иск"]
     if any(k in text for k in strong_legal):
         return True
-
     legal_keywords = [
         "регистрац", "право", "документ", "сделка", "газ", "переплан", "реконструк",
         "кадастр", "земл", "доля", "наследств", "техплан", "бти", "егрн"
@@ -454,77 +426,33 @@ def looks_like_real_estate(answers: dict) -> bool:
         "квартир", "дом", "дача", "участок", "склад", "производ", "цех", "офис", "здани",
         "помещен", "недвижим"
     ]
-
     has_legal = any(k in text for k in legal_keywords)
     has_object = any(k in text for k in object_keywords)
-
     if has_object and has_legal:
         return True
-
     if answers.get("object_type") not in (None, "unknown") or answers.get("issue_type") not in (None, "unknown"):
         return True
-
     return False
-
 
 def classify_lead(answers: dict) -> str:
     if not looks_like_real_estate(answers):
         return "nontarget"
-
     if answers.get("contact") and answers.get("location_description") and answers.get("raw_user_problem"):
         return "target"
-
     return "partial"
-
 
 def detect_contact(text: str) -> tuple[str | None, str]:
     text = text.strip()
-
-    telegram_match = re.search(r'@[\w_]{3,}', text)
-    if telegram_match:
-        return telegram_match.group(0), "telegram"
-
     digits = re.sub(r"\D", "", text)
-
     if len(digits) == 11 and digits[0] in ("7", "8"):
         return text, "phone"
-
     if len(digits) == 10:
         return text, "phone"
-
     return None, "unknown"
 
-
-def detect_cadastral_status(text: str) -> tuple[str | None, str | None]:
-    raw = text.strip().lower()
-
-    cadastral_match = re.search(r'\b\d{1,4}:\d{1,4}:\d{1,10}:\d{1,10}\b', text)
-    if cadastral_match:
-        return cadastral_match.group(0), "provided"
-
-    negative_patterns = [
-        "кадастрового номера нет",
-        "кадастровый номер отсутствует",
-        "нет кадастрового номера",
-        "кадастра нет",
-        "нет",
-        "не знаю",
-    ]
-
-    if raw in negative_patterns or any(p in raw for p in negative_patterns):
-        return None, "absent"
-
-    return None, None
-
-
-def heuristic_location_detection(text: str) -> bool:
-    text = text.strip().lower()
-    location_markers = ["город", "деревня", "посёлок", "район", "снт", "ул", "проспект", "шоссе", "бульвар", "переулок"]
-    words = text.split()
-    if len(words) <= 5 and any(marker in text for marker in location_markers):
-        return True
-    return False
-
+def detect_email(text: str) -> str | None:
+    match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', text)
+    return match.group(0) if match else None
 
 def normalize_location(loc: str) -> str:
     if not loc:
@@ -534,32 +462,34 @@ def normalize_location(loc: str) -> str:
         loc = loc[2:].strip()
     if loc.startswith("на "):
         loc = loc[3:].strip()
-    if loc.startswith("в "):
-        loc = loc[2:].strip()
     if loc:
         loc = loc[0].upper() + loc[1:]
     return loc
-
 
 def determine_case_family(answers: dict) -> str:
     property_segment = answers.get("property_segment") or "unknown"
     object_type = answers.get("object_type") or "unknown"
     issue_type = answers.get("issue_type") or "unknown"
     goal = answers.get("goal") or "unknown"
-
-    if object_type == "house" and issue_type == "unauthorized_construction" and goal == "registration":
-        return "residential_house_registration"
-
-    if object_type in ("warehouse", "production", "shop", "office", "building"):
+    
+    if issue_type == "shared_ownership_problem":
+        return "shared_ownership_issue"
+    if issue_type == "boundary_problem" or issue_type == "land_problem":
+        return "land_boundary_issue"
+    
+    if object_type in ("warehouse", "production", "shop", "office", "building", "part_of_building"):
         if issue_type in ("bank_problem", "transaction_block") or goal == "bank_pledge":
             return "commercial_bank_block"
-        if issue_type == "document_mismatch":
+        if issue_type == "document_mismatch" or "расхожд" in str(answers.get("raw_user_problem", "")).lower():
             return "commercial_document_mismatch"
+    
+    if object_type == "house" and issue_type == "unauthorized_construction" and goal == "registration":
+        return "residential_house_registration"
+    if object_type in ("warehouse", "production", "shop", "office", "building"):
         if issue_type in ("redevelopment", "reconstruction"):
             return "commercial_redevelopment"
         if issue_type in ("unauthorized_construction", "registration_absent") or goal in ("registration", "legalization"):
             return "commercial_new_building"
-
     if property_segment == "residential":
         if goal == "gas_connection" or issue_type == "gas_connection_block":
             return "gas_connection_house"
@@ -569,20 +499,11 @@ def determine_case_family(answers: dict) -> str:
             return "residential_house_registration"
         if issue_type == "inheritance_real_estate":
             return "inheritance_real_estate"
-        if issue_type == "shared_ownership_problem":
-            return "shared_ownership_issue"
-
-    if issue_type in ("boundary_problem", "land_problem"):
-        return "land_boundary_issue"
-
     if issue_type == "lease_problem":
         return "lease_problem"
-
     if looks_like_real_estate(answers):
         return "other_real_estate_case"
-
     return "unknown"
-
 
 def build_consultation_plan(case_family: str) -> dict:
     plans = {
@@ -650,9 +571,9 @@ def build_consultation_plan(case_family: str) -> dict:
             "case_family": case_family,
             "consultation_mode": "one_path_plus_check",
             "primary_path": "Регистрация дома в обычном порядке",
-            "secondary_path": "Проверка препятствий и альтернативный правовой сценарий",
-            "primary_path_short": "Если участок и параметры дома позволяют, обычно начинают с технического плана и подачи документов на регистрацию.",
-            "secondary_path_short": "Если обычная регистрация не проходит из-за земли, параметров дома или документов, сначала нужно понять, что именно мешает.",
+            "secondary_path": "Судебное оформление права (запасной сценарий)",
+            "primary_path_short": "Техплан → подача документов в Росреестр → регистрация права собственности.",
+            "secondary_path_short": "Если обычная регистрация не проходит из-за земли или параметров дома, может потребоваться судебный порядок.",
             "need_to_check": [
                 "статус участка",
                 "вид разрешённого использования земли",
@@ -665,9 +586,9 @@ def build_consultation_plan(case_family: str) -> dict:
             "case_family": case_family,
             "consultation_mode": "one_path_plus_check",
             "primary_path": "Упрощённая регистрация дома",
-            "secondary_path": "Проверка препятствий по земле и документам",
-            "primary_path_short": "Если объект и земля подходят под упрощённый порядок, обычно начинают с технического плана и регистрации права.",
-            "secondary_path_short": "Если по участку, параметрам дома или исходным документам есть ограничения, сначала нужно понять, можно ли идти обычным путём.",
+            "secondary_path": "Проверка препятствий и альтернативный сценарий",
+            "primary_path_short": "Техплан → подача в Росреестр по дачной амнистии или в общем порядке.",
+            "secondary_path_short": "Если по участку или дому есть ограничения, сначала нужно разобраться, что мешает.",
             "need_to_check": [
                 "статус участка",
                 "СНТ, земли населённых пунктов или иное",
@@ -681,8 +602,8 @@ def build_consultation_plan(case_family: str) -> dict:
             "consultation_mode": "one_path_plus_check",
             "primary_path": "Оформление дома для подключения газа",
             "secondary_path": "Проверка, что мешает обычной регистрации",
-            "primary_path_short": "Если дом можно зарегистрировать в обычном порядке, обычно начинают с технического плана и оформления права.",
-            "secondary_path_short": "Если обычный путь не проходит, нужно понять, проблема в земле, характеристиках дома или комплекте документов.",
+            "primary_path_short": "Технический план → регистрация права → подключение газа.",
+            "secondary_path_short": "Если обычный путь не проходит, нужно понять, проблема в земле, характеристиках дома или документах.",
             "need_to_check": [
                 "статус участка",
                 "есть ли документы на дом и землю",
@@ -696,7 +617,7 @@ def build_consultation_plan(case_family: str) -> dict:
             "consultation_mode": "document_first",
             "primary_path": "Кадастровая и документальная проверка",
             "secondary_path": "Судебное урегулирование спора",
-            "primary_path_short": "В таких вопросах сначала поднимают документы, межевой план, сведения ЕГРН и фактические границы.",
+            "primary_path_short": "Поднимают документы, межевой план, сведения ЕГРН и фактические границы.",
             "secondary_path_short": "Если конфликт по границам не решается документально, вопрос уходит в судебный порядок.",
             "need_to_check": [
                 "выписка ЕГРН",
@@ -779,7 +700,6 @@ def build_consultation_plan(case_family: str) -> dict:
     }
     return deepcopy(plans.get(case_family, plans["unknown"]))
 
-
 def object_label(answers: dict) -> str:
     object_map = {
         "warehouse": "складском объекте",
@@ -797,7 +717,6 @@ def object_label(answers: dict) -> str:
         "unknown": "объекте недвижимости",
     }
     return object_map.get(answers.get("object_type") or "unknown", "объекте недвижимости")
-
 
 def issue_label(answers: dict) -> str:
     issue_map = {
@@ -821,137 +740,16 @@ def issue_label(answers: dict) -> str:
     }
     return issue_map.get(answers.get("issue_type") or "unknown", "юридическим вопросом по недвижимости")
 
-
-def build_quick_expert_reply_v2(answers: dict, plan: dict) -> str:
-    obj_type = answers.get("object_type")
-    issue_type = answers.get("issue_type")
-    goal = answers.get("goal")
-    property_segment = answers.get("property_segment")
-    mode = plan.get("consultation_mode", "unknown")
-
-    greetings = [
-        "Понял, спасибо за объяснение.",
-        "Ясно, типичная ситуация.",
-        "Понял, давайте разбираться.",
-        "Хорошо, я понял суть."
-    ]
-    intro = random.choice(greetings)
-
-    if issue_type == "unauthorized_construction" and obj_type == "house":
-        return (
-            f"{intro}\n\n"
-            "У вас незарегистрированное строение, при этом нарушен отступ от границы (менее 3 м).\n\n"
-            "Такие объекты обычно не проходят стандартную регистрацию. Два пути:\n"
-            "1️⃣ Если нарушение не критично и соседи не против – можно попробовать судебное узаконивание.\n"
-            "2️⃣ Если нарушение существенное – потребуется экспертиза и суд.\n\n"
-            "Ключевой момент: насколько критично нарушение и есть ли претензии соседей.\n"
-            "Где находится объект?"
-        )
-
-    if obj_type in ("warehouse", "production", "shop", "office", "building") and issue_type == "document_mismatch":
-        return (
-            f"{intro}\n\n"
-            "У вас коммерческий объект, где факт не совпадает с документами.\n\n"
-            "Обычно два пути:\n"
-            "1️⃣ Если расхождения можно устранить через новый техплан – без суда.\n"
-            "2️⃣ Если объект давно эксплуатируется с изменениями – нужен суд и экспертиза.\n\n"
-            "Что проверить: документы на землю, техплан, были ли отказы.\n"
-            "Где находится объект?"
-        )
-
-    if goal == "bank_pledge" or issue_type == "bank_problem":
-        return (
-            f"{intro}\n\n"
-            "Банк отказал в кредите под залог из-за расхождений.\n\n"
-            "Сценарии:\n"
-            "1️⃣ Привести документы в соответствие (техплан, ЕГРН) – без суда.\n"
-            "2️⃣ Узаконить изменения через суд с экспертизой.\n\n"
-            "Что проверить: причину отказа, техплан, землю.\n"
-            "Где находится объект?"
-        )
-
-    if issue_type in ("registration_absent", "unauthorized_construction") or goal in ("registration", "legalization"):
-        if obj_type in ("warehouse", "production", "shop", "office", "building"):
-            return (
-                f"{intro}\n\n"
-                "Объект не зарегистрирован или есть неузаконенные изменения.\n\n"
-                "Два варианта:\n"
-                "1️⃣ Если всё соответствует нормам – регистрация через техплан и Росреестр.\n"
-                "2️⃣ Если есть нарушения – суд и экспертиза.\n\n"
-                "Что проверить: документы на землю, техплан, были ли отказы.\n"
-                "Где находится объект?"
-            )
-        else:
-            return (
-                f"{intro}\n\n"
-                "Нужно зарегистрировать объект или узаконить изменения.\n\n"
-                "Обычно начинают с техплана и подачи документов.\n"
-                "Если есть препятствия – потребуется дополнительный разбор.\n\n"
-                "Где находится объект?"
-            )
-
-    if obj_type in ("house", "dacha") or property_segment == "residential":
-        if goal == "gas_connection":
-            return (
-                f"{intro}\n\n"
-                "Нужно зарегистрировать дом для газа.\n\n"
-                "Газовые службы требуют право собственности. Обычно начинают с техплана и Росреестра.\n\n"
-                "Где находится объект?"
-            )
-        else:
-            return (
-                f"{intro}\n\n"
-                "Речь о жилом доме, который нужно оформить.\n\n"
-                "Обычно готовят техплан и подают на регистрацию.\n"
-                "Если есть препятствия по земле или параметрам – нужен разбор.\n\n"
-                "Где находится объект?"
-            )
-
-    if mode == "two_paths":
-        return (
-            f"Понял. Речь о {object_label(answers)}, проблема — {issue_label(answers)}.\n\n"
-            f"Два основных сценария:\n"
-            f"1️⃣ {plan['primary_path_short']}\n"
-            f"2️⃣ {plan['secondary_path_short']}\n\n"
-            "Что проверить: право на землю, техдокументацию, отказы.\n"
-            "Уточните, где находится объект?"
-        )
-    elif mode == "one_path_plus_check":
-        return (
-            f"Понял. Речь о {object_label(answers)}.\n\n"
-            f"Базовый путь: {plan['primary_path_short']}\n\n"
-            "Если не сработает – потребуется проверка (земля, документы).\n"
-            "Где находится объект?"
-        )
-    else:
-        return (
-            f"Понял. Ситуация связана с {object_label(answers)} ({issue_label(answers)}).\n\n"
-            "Чтобы дать оценку, нужно знать:\n"
-            "• где объект;\n"
-            "• документы на землю;\n"
-            "• были ли отказы.\n\n"
-            "Где находится объект?"
-        )
-
-
-def build_question_response(step: str, answers: dict, custom_message: str | None = None):
-    return {
+def build_question_response(message_for_user: str, options: list = None, session=None):
+    if session:
+        session["last_question"] = message_for_user
+    response = {
         "status": "question",
-        "step": step,
-        "message_for_user": custom_message or QUESTION_TEXTS[step],
-        "collected": {
-            "raw_user_problem": answers.get("raw_user_problem"),
-            "location_description": answers.get("location_description"),
-            "cadastral_number": answers.get("cadastral_number"),
-            "cadastral_status": answers.get("cadastral_status"),
-            "contact": answers.get("contact"),
-            "object_type": answers.get("object_type"),
-            "property_segment": answers.get("property_segment"),
-            "issue_type": answers.get("issue_type"),
-            "goal": answers.get("goal"),
-        },
+        "message_for_user": message_for_user,
     }
-
+    if options:
+        response["options"] = options
+    return response
 
 def build_nontarget_response(answers: dict):
     return {
@@ -974,6 +772,207 @@ def build_nontarget_response(answers: dict):
         "form_payload": None,
     }
 
+def user_signaled_no_more_info(user_message: str) -> bool:
+    text = user_message.lower().strip()
+    phrases = [
+        "это всё",
+        "это всё что я знаю",
+        "больше ничего не знаю",
+        "всё что могу сказать",
+        "больше информации нет",
+        "ничего больше нет",
+        "все данные",
+        "всё, что есть",
+    ]
+    return any(phrase in text for phrase in phrases)
+
+def data_is_enough_for_preliminary_conclusion(answers: dict) -> bool:
+    obj = answers.get("object_type")
+    issue = answers.get("issue_type")
+    if obj is None or obj == "unknown" or issue is None or issue == "unknown":
+        return False
+    location = answers.get("location_description")
+    if location is None or location == "" or location == "не указана":
+        return False
+    
+    is_commercial = (answers.get("property_segment") == "commercial" or
+                     obj in ("warehouse", "production", "shop", "office", "building"))
+    if not is_commercial:
+        return True
+    
+    case_family = determine_case_family(answers)
+    if case_family in ("commercial_redevelopment", "commercial_document_mismatch"):
+        has_land_or_cadastral = (answers.get("land_rights_status") not in (None, "unknown") or
+                                  answers.get("cadastral_number") not in (None, ""))
+        if not has_land_or_cadastral:
+            return False
+        has_docs = (answers.get("documents") and
+                    len(answers.get("documents", [])) > 0 and
+                    "none" not in answers.get("documents", []))
+        has_refusals = answers.get("has_refusals_or_disputes") not in (None, "unknown")
+        return has_docs or has_refusals
+    else:
+        return (answers.get("land_rights_status") not in (None, "unknown") or
+                answers.get("cadastral_number") not in (None, ""))
+
+def data_is_enough_for_full_analysis(answers: dict) -> bool:
+    return (answers.get("contact") is not None and
+            answers.get("object_type") not in (None, "unknown") and
+            answers.get("issue_type") not in (None, "unknown"))
+
+def build_preliminary_conclusion_response(answers: dict, plan: dict) -> dict:
+    obj = object_label(answers)
+    issue = issue_label(answers)
+    location = normalize_location(answers.get("location_description") or "")
+    if location == "не указана":
+        location_str = "неизвестной локации"
+    else:
+        location_str = f"в {location}"
+    problem_desc = f"{obj} без правоустанавливающих документов" if answers.get("issue_type") in ("unauthorized_construction", "registration_absent") else f"{issue} на {obj}"
+    primary = plan.get("primary_path_short") or "требуется индивидуальный разбор"
+    secondary = plan.get("secondary_path_short")
+    
+    case_family = plan.get("case_family") or determine_case_family(answers)
+    
+    if case_family == "shared_ownership_issue":
+        risk = "Конфликт между собственниками и невозможность решить вопрос без суда"
+        factor = "Как оформлены доли и есть ли согласие/конфликт между собственниками"
+    elif case_family == "land_boundary_issue":
+        risk = "Закрепление неверной границы и спор с соседом"
+        factor = "Есть ли межевание и совпадают ли данные ЕГРН с фактической границей"
+    elif case_family == "commercial_bank_block":
+        risk = "Банк не примет объект в залог до устранения расхождений"
+        factor = "Что именно не совпадает в документах и можно ли исправить это без суда"
+    elif case_family in ("residential_house_registration", "residential_dacha_registration"):
+        risk = "Отказ в регистрации при неподходящих параметрах участка или дома"
+        factor = "Статус участка, ВРИ, наличие документов на землю и техплана"
+    elif case_family == "gas_connection_house":
+        risk = "Газ не подключат без регистрации дома"
+        factor = "Можно ли зарегистрировать дом в обычном порядке без суда"
+    else:
+        if answers.get("issue_type") == "unauthorized_construction":
+            risk = "Риск сноса или отказа во внесудебной регистрации"
+        elif answers.get("land_rights_status") == "not_registered":
+            risk = "Отсутствие прав на землю делает объект самовольной постройкой"
+        elif answers.get("bank_or_transaction_context") == "bank_refusal":
+            risk = "Банк не примет объект в залог без приведения документов в порядок"
+        else:
+            risk = "Риск длительных судебных разбирательств и дополнительных расходов"
+        
+        if answers.get("land_rights_status") == "owned":
+            factor = "Наличие права собственности на землю упрощает судебный путь"
+        elif answers.get("cadastral_number"):
+            factor = "Наличие кадастрового номера позволяет быстрее подготовить техплан"
+        elif answers.get("has_refusals_or_disputes") == "yes":
+            factor = "Уже были отказы – нужно переходить к судебному порядку"
+        else:
+            factor = "Точный сценарий зависит от статуса земли и наличия разрешительной документации"
+    
+    message = (
+        f"**Что я понял:**\n"
+        f"Речь идёт о {obj} {location_str}. Проблема — {issue}.\n\n"
+        f"**Ключевая проблема:** {problem_desc}\n\n"
+        f"**Возможны 2 сценария:**\n"
+        f"1️⃣ {primary}\n"
+    )
+    if secondary:
+        message += f"2️⃣ {secondary}\n\n"
+    else:
+        message += "\n"
+    message += (
+        f"**Ключевой риск:** {risk}\n\n"
+        f"**От чего зависит решение:** {factor}\n\n"
+        "Дальше всё упирается в документы.\n"
+        "Могу быстро разобрать ваш объект и сказать:\n"
+        "— можно ли узаконить без суда\n"
+        "— или сразу нужно идти в суд\n\n"
+        "Оставьте телефон или Telegram — разберу ситуацию и дам конкретный план действий."
+    )
+    return {
+        "status": "question",
+        "message_for_user": message,
+        "preliminary": True,
+    }
+
+def plan_next_step(answers: dict, history: list, force_finalize: bool = False) -> dict:
+    history_text = ""
+    for entry in history[-5:]:
+        user = entry.get("user", "")
+        history_text += f"Клиент: {user}\n"
+    
+    force_instruction = ""
+    if force_finalize:
+        force_instruction = "Пользователь сказал, что это всё, что он знает. Если не хватает одного критичного факта — задай его. Если данных достаточно — дай preliminary.\n"
+    
+    prompt = f"""Ты — юридический эксперт по недвижимости. На основе текущих фактов и истории диалога реши, достаточно ли данных для предварительного разбора.
+
+Текущие факты (answers):
+{json.dumps(answers, ensure_ascii=False, indent=2)}
+
+История диалога (последние сообщения):
+{history_text}
+
+{force_instruction}
+
+Инструкция:
+- Если данных достаточно, чтобы понять суть проблемы, объект, локацию и ключевые обстоятельства — верни ready=true и message — это краткий предварительный разбор.
+- Если данных не хватает — верни ready=false и message — это один конкретный уточняющий вопрос (максимум 15 слов).
+- В предварительном разборе (ready=true) должна быть структура:
+  * Что я понял (одна короткая фраза)
+  * В чём проблема (одно предложение)
+  * Сценарии (1-2 варианта, без лишних слов)
+  * Главный риск (одна фраза)
+  * От чего зависит решение (одна фраза)
+- Ни в коем случае не используй слова: "мягкий CTA", "CTA", "оставьте контакт для связи", "ниже варианты", "структура ответа", "блок", "продающий".
+- Вместо прямого призыва оставить контакт, заверши разбор естественным переходом к следующему шагу, например: "Если хотите, могу дальше посмотреть документы и сказать точный путь" или "Для уточнения плана действий можно передать контакт".
+- Формулируй ответ естественно, без служебных маркеров. Не пиши "**Что я понял**" и подобные заголовки — просто текст.
+- Ответ должен быть только JSON вида: {{"ready": true/false, "message": "текст"}}
+
+Отвечай JSON."""
+    
+    messages = [
+        {"role": "system", "content": "Ты — аналитик. Отвечаешь только JSON. Никаких пояснений, только JSON."},
+        {"role": "user", "content": prompt}
+    ]
+    try:
+        raw = call_deepseek(messages, timeout=30, max_tokens=800)
+        parsed = safe_parse_json(raw)
+        ready = parsed.get("ready", False)
+        message = parsed.get("message", "")
+        if not isinstance(ready, bool):
+            ready = False
+        if not isinstance(message, str):
+            message = ""
+        forbidden = ["мягкий cta", "cta", "оставьте контакт для связи", "ниже варианты", "структура ответа", "блок", "продающий"]
+        msg_lower = message.lower()
+        for phrase in forbidden:
+            if phrase in msg_lower:
+                message = message.replace(phrase, "").strip()
+                if not message:
+                    message = "Для дальнейшего анализа можно оставить контакт."
+                break
+        return {"ready": ready, "message": message}
+    except Exception as e:
+        log_event("plan_next_step_error", {"error": str(e)})
+        return {"ready": False, "message": ""}
+
+def build_next_document_request(answers: dict, plan: dict) -> str:
+    case_family = plan.get("case_family", "unknown")
+    
+    if case_family in ("commercial_bank_block", "commercial_document_mismatch"):
+        return "Чтобы перейти к точному разбору, пришлите техплан, БТИ, выписку ЕГРН или текст отказа банка, если он у вас есть."
+    elif case_family in ("commercial_redevelopment", "commercial_new_building"):
+        return "Чтобы определить точный путь, пришлите кадастровый номер, документы на землю, техплан или старый план БТИ, если они есть."
+    elif case_family in ("residential_house_registration", "residential_dacha_registration", "gas_connection_house"):
+        return "Чтобы перейти к точному разбору, пришлите кадастровый номер участка, документы на землю, год постройки дома или техплан, если он уже есть."
+    elif case_family == "land_boundary_issue":
+        return "Чтобы точно понять ситуацию по границе, пришлите выписку ЕГРН, межевой план или кадастровый номер участка, если они есть."
+    elif case_family == "shared_ownership_issue":
+        return "Чтобы перейти к точному разбору, пришлите выписку ЕГРН, сведения о долях и, если есть, данные по долгу или лицевому счёту."
+    elif case_family == "inheritance_real_estate":
+        return "Чтобы перейти к точному разбору, пришлите документы на объект и данные по наследственному делу, если они уже есть."
+    else:
+        return "Для точного разбора пришлите, пожалуйста, кадастровый номер, выписку ЕГРН, техплан или другой ключевой документ по объекту."
 
 def generate_legal_analysis_with_cta(answers: dict, plan: dict) -> str:
     obj = object_label(answers)
@@ -985,14 +984,121 @@ def generate_legal_analysis_with_cta(answers: dict, plan: dict) -> str:
     has_refusals = answers.get("has_refusals_or_disputes") or "не указано"
     bank_context = answers.get("bank_or_transaction_context") or "не указано"
     raw_problem = answers.get("raw_user_problem") or ""
-    contact = answers.get("contact")
 
-    prompt = f"""Ты — практикующий юрист по недвижимости в России.
+    case_family = plan.get("case_family", "unknown")
 
-На основе данных клиента сделай структурированный юридический разбор.
+    # Определяем case-specific риски
+    risk_map = {
+        "commercial_bank_block": (
+            "• Банк не примет объект в залог\n"
+            "• Сделка может не состояться\n"
+            "• Потребуется срочная переделка документов"
+        ),
+        "commercial_document_mismatch": (
+            "• Росреестр может отказать в регистрации\n"
+            "• Проблемы при продаже объекта\n"
+            "• Несоответствие может всплыть при любой проверке"
+        ),
+        "commercial_redevelopment": (
+            "• Риск признания реконструкции самовольной\n"
+            "• Штрафы и предписания от администрации\n"
+            "• Сложности с узакониванием изменений"
+        ),
+        "residential_house_registration": (
+            "• Отказ в регистрации права собственности\n"
+            "• Невозможность подключить газ и коммуникации\n"
+            "• Ограничения в распоряжении домом"
+        ),
+        "residential_dacha_registration": (
+            "• Отказ в регистрации из-за несоответствия параметров\n"
+            "• Проблемы при продаже или дарении\n"
+            "• Невозможность оформить дом официально"
+        ),
+        "gas_connection_house": (
+            "• Газ не подключат без зарегистрированного права\n"
+            "• Дополнительные согласования и расходы\n"
+            "• Затягивание сроков подключения"
+        ),
+        "land_boundary_issue": (
+            "• Спор с соседом может перерасти в судебный\n"
+            "• Наложение границ по документам\n"
+            "• Риск закрепления неверной границы"
+        ),
+        "shared_ownership_issue": (
+            "• Конфликт между собственниками\n"
+            "• Блокировка любой сделки с недвижимостью\n"
+            "• Судебные споры о порядке пользования"
+        ),
+        "inheritance_real_estate": (
+            "• Пропуск срока принятия наследства\n"
+            "• Споры между наследниками\n"
+            "• Отказ нотариуса в выдаче свидетельства"
+        ),
+    }
+    risk_block = risk_map.get(case_family, (
+        "• Юридические риски, связанные с конкретной ситуацией\n"
+        "• Возможные отказы госорганов\n"
+        "• Дополнительные судебные издержки"
+    ))
+
+    # Определяем case-specific действия
+    action_map = {
+        "commercial_bank_block": (
+            "Анализируем причину отказа банка\n"
+            "Приводим техническую документацию в порядок\n"
+            "При необходимости идём в суд для узаконивания"
+        ),
+        "commercial_document_mismatch": (
+            "Корректируем техплан и подаём в Росреестр\n"
+            "Обновляем данные в ЕГРН\n"
+            "Либо готовим иск о признании права"
+        ),
+        "commercial_redevelopment": (
+            "Готовим техплан и проектную документацию\n"
+            "Проверяем допустимость изменений\n"
+            "Согласовываем или идём в суд"
+        ),
+        "residential_house_registration": (
+            "Заказываем техплан у кадастрового инженера\n"
+            "Подаём документы в Росреестр\n"
+            "При отказе — готовим иск в суд"
+        ),
+        "residential_dacha_registration": (
+            "Готовим техплан\n"
+            "Подаём уведомление или заявление по дачной амнистии\n"
+            "Регистрируем право в Росреестре"
+        ),
+        "gas_connection_house": (
+            "Оформляем право собственности на дом\n"
+            "Готовим техплан и подаём на регистрацию\n"
+            "После регистрации подключаем газ"
+        ),
+        "land_boundary_issue": (
+            "Анализируем выписку ЕГРН и межевой план\n"
+            "Пытаемся решить с соседом мирно\n"
+            "При отказе — судебное установление границ"
+        ),
+        "shared_ownership_issue": (
+            "Анализируем доли и документы\n"
+            "Вырабатываем досудебную стратегию\n"
+            "При конфликте — иск в суд"
+        ),
+        "inheritance_real_estate": (
+            "Проверяем наследственное дело\n"
+            "Восстанавливаем сроки, если пропущены\n"
+            "При споре — судебный порядок"
+        ),
+    }
+    action_block = action_map.get(case_family, (
+        "Анализируем документы\n"
+        "Выбираем оптимальный путь\n"
+        "Готовим необходимые заявления или иск"
+    ))
+
+    prompt = f"""Ты — практикующий юрист по недвижимости в России. Сделай чёткий, конкретный разбор. Без цитат сообщения клиента, без повторного запроса контакта.
 
 Данные:
-- Тип объекта: {obj}
+- Объект: {obj}
 - Проблема: {issue}
 - Цель: {goal}
 - Локация: {location}
@@ -1000,107 +1106,129 @@ def generate_legal_analysis_with_cta(answers: dict, plan: dict) -> str:
 - Статус земли: {land_rights}
 - Отказы/споры: {has_refusals}
 - Банк/сделка: {bank_context}
-- Исходное сообщение клиента: {raw_problem}
 
-Типовой сценарий: {plan.get('primary_path_short', 'не указан')}
+Специфика кейса: {case_family}
 
-Требования к ответу:
-- Объём: 1500–2500 символов (максимум 3000 для сложных кейсов).
-- Структура:
-  **Текущая ситуация**
-  **Риски**
-  **Стратегия защиты**
-  **Основной сценарий решения**
-  **Альтернативный сценарий**
-  **Вывод**
+Риски (конкретно для этого типа ситуации):
+{risk_block}
 
-Стиль: как опытный юрист, без воды, понятным языком, без академических ссылок, опирайся на практику.
+Что можно сделать (конкретные шаги для этого кейса):
+{action_block}
 
-"""
-    if contact:
-        prompt += """
-После вывода добавь 2–3 предложения с предложением конкретной помощи (например: составление иска, заказ техплана, сопровождение в суде, регистрация права). Не проси контакт повторно, так как он уже есть.
-Пример: "Если хотите, я могу подготовить исковое заявление для вашей ситуации. Или заказать технический план. Просто напишите, и мы начнём."
-"""
-    else:
-        prompt += """
-После вывода добавь мягкий призыв оставить контакт (телефон или Telegram) для детального разбора и подготовки плана действий. Например:
-"Если хотите, чтобы я разобрал ваш кейс глубже и подготовил точный план действий под ваши документы, оставьте, пожалуйста, телефон или Telegram — я свяжусь с вами."
-"""
+Требования:
+1. Пиши коротко, по делу, как практик.
+2. Не используй лишнее ** (только заголовки).
+3. Избегай фраз «оставьте контакт» — контакт уже есть.
+4. В блоке «Что можно сделать» используй предложенный action_block (можно немного переформулировать).
+5. Добавь блок «Как я могу помочь»:
+   - Проверить документы и дать точный сценарий.
+   - Организовать технический план через кадастрового инженера.
+   - При необходимости вести суд до регистрации.
+   - Поэтапная оплата без 100% предоплаты.
 
+Структура ответа:
+
+**Текущая ситуация**
+(2–3 предложения, без воды)
+
+**Риски**
+(используй risk_block)
+
+**Что можно сделать**
+(используй action_block)
+
+**Как я могу помочь**
+(короткий продающий блок)
+
+**Вывод**
+(без повтора контакта, просто итог)
+
+Стиль: уверенный, экспертный, без заигрываний."""
+    
     messages = [
-        {"role": "system", "content": "Ты — опытный юрист по недвижимости. Отвечаешь кратко, по делу, структурированно. Не выдумываешь факты. Используешь понятный русский язык."},
+        {"role": "system", "content": "Ты — практикующий юрист по недвижимости. Отвечаешь чётко, без цитат и повторного запроса контакта."},
         {"role": "user", "content": prompt}
     ]
     try:
-        analysis = call_deepseek(
-            messages,
-            timeout=DEEPSEEK_TIMEOUT_LONG,
-            max_tokens=DEEPSEEK_MAX_TOKENS_LONG,
-        )
+        analysis = call_deepseek(messages, timeout=90, max_tokens=1800)
+        if len(analysis.strip()) < 500:
+            log_event("analysis_error", {"error": "Response too short", "length": len(analysis), "stage": "full_analysis"})
+            return build_fallback_final_response(answers, plan)
         if len(analysis) > 3500:
             cut_point = analysis.rfind('.', 0, 3500)
             if cut_point == -1:
                 cut_point = 3500
-            analysis = analysis[:cut_point+1] + "\n\n(текст сокращён для краткости, но полный разбор будет в заявке)"
+            analysis = analysis[:cut_point+1] + "\n\n(текст сокращён для краткости)"
         return analysis
-    except Exception as e:
+    except (TimeoutError, RuntimeError, Exception) as e:
+        log_event("analysis_error", {"error": str(e), "stage": "full_analysis"})
         return build_fallback_final_response(answers, plan)
-
 
 def build_fallback_final_response(answers: dict, plan: dict) -> str:
     obj = object_label(answers)
     issue = issue_label(answers)
-    raw_location = answers.get("location_description") or answers.get("region") or "неуточнённом месте"
-    location = normalize_location(raw_location)
-    plan_lines = []
-    if plan.get("primary_path_short"):
-        plan_lines.append(f"• {plan['primary_path_short']}")
-    if plan.get("secondary_path_short"):
-        plan_lines.append(f"• {plan['secondary_path_short']}")
-    plan_text = "\n".join(plan_lines) if plan_lines else "• Требуется индивидуальный разбор."
-    docs_needed = []
-    if answers.get("cadastral_status") != "provided":
-        docs_needed.append("кадастровый номер или техплан")
-    if not docs_needed:
-        docs_needed.append("правоустанавливающие документы на объект и землю")
-    docs_text = ", ".join(docs_needed)
-
-    if answers.get("contact"):
-        final_message = (
-            f"Спасибо. Ситуация понятна: {obj} в {location}, вопрос — {issue}.\n\n"
-            f"**Что можно сделать:**\n{plan_text}\n\n"
-            f"**Что понадобится:** {docs_text}.\n\n"
-            "Контакт уже получен. В ближайшее время юрист свяжется с вами."
-        )
+    location = normalize_location(answers.get("location_description") or answers.get("region") or "не указана")
+    if location == "не указана":
+        location_str = "неизвестной локации"
     else:
-        final_message = (
-            f"Спасибо. Ситуация понятна: {obj} в {location}, вопрос — {issue}.\n\n"
-            f"**Что можно сделать:**\n{plan_text}\n\n"
-            f"**Что понадобится:** {docs_text}.\n\n"
-            "Без анализа конкретных документов точный сценарий назвать нельзя. "
-            "Оставьте, пожалуйста, телефон или Telegram — я свяжусь с вами, разберу документы и скажу, какой путь оптимален именно для вас."
-        )
+        location_str = f"в {location}"
+
+    situation = f"Объект: {obj} {location_str}. Проблема: {issue}."
+
+    risks = []
+    issue_type = answers.get("issue_type")
+    if issue_type == "unauthorized_construction":
+        risks.append("• Риск сноса или отказа во внесудебной регистрации")
+        risks.append("• Невозможность продажи или залога до узаконивания")
+        risks.append("• Штрафы за самовольное строительство")
+    elif issue_type == "document_mismatch":
+        risks.append("• Блокировка сделок из-за расхождений в документах")
+        risks.append("• Проблемы с налоговой и кадастровой стоимостью")
+    elif issue_type == "registration_absent":
+        risks.append("• Отсутствие права собственности юридически")
+        risks.append("• Нельзя подключить газ или электричество")
+    else:
+        risks.append("• Риск длительных судебных разбирательств")
+        risks.append("• Дополнительные расходы")
+    risks_text = "\n".join(risks)
+
+    primary = plan.get("primary_path_short") or "требуется индивидуальный разбор"
+    secondary = plan.get("secondary_path_short")
+    scenarios = f"**Что можно сделать**\n- Административный путь: {primary}\n"
+    if secondary:
+        scenarios += f"- Судебный путь: {secondary}\n"
+    else:
+        scenarios += "- Судебный путь: экспертиза → иск → регистрация\n"
+
+    help_block = """**Как я могу помочь**
+- Проверю ваши документы и скажу точный сценарий (суд или без суда)
+- Организую технический план через своего кадастрового инженера
+- При необходимости проведу суд до регистрации права
+- Поэтапная оплата — без 100% предоплаты"""
+
+    conclusion = "Дальше всё упирается в документы. Если хотите, разберу ваш объект и скажу точный путь с шансами и сроками."
+
+    final_message = f"""**Текущая ситуация**
+{situation}
+
+**Риски**
+{risks_text}
+
+{scenarios}
+{help_block}
+
+**Вывод**
+{conclusion}"""
     return final_message
 
-
 def build_final_response(answers: dict, lead_category: str, plan: dict):
-    use_llm_analysis = False
-    if lead_category == "target" and answers.get("contact"):
-        obj_type = answers.get("object_type")
-        issue_type = answers.get("issue_type")
-        if obj_type not in (None, "unknown") and issue_type not in (None, "unknown"):
-            use_llm_analysis = True
-
-    if use_llm_analysis:
+    if data_is_enough_for_full_analysis(answers):
         final_message = generate_legal_analysis_with_cta(answers, plan)
     else:
         final_message = build_fallback_final_response(answers, plan)
-
     raw_problem = answers.get("raw_user_problem") or ""
     court_needed = "да" if answers.get("issue_type") in ("unauthorized_construction", "document_mismatch") else "нет"
     risk_level = "высокий" if any(word in raw_problem.lower() for word in ["снос", "нарушен", "самовольн"]) else "средний"
-
     return {
         "status": "final",
         "lead_category": lead_category,
@@ -1132,7 +1260,6 @@ def build_final_response(answers: dict, lead_category: str, plan: dict):
         "form_payload": build_form_payload(answers, plan),
     }
 
-
 def build_form_payload(answers: dict, plan: dict):
     raw_contact = answers.get("contact") or ""
     digits = re.sub(r"\D", "", raw_contact)
@@ -1142,7 +1269,6 @@ def build_form_payload(answers: dict, plan: dict):
         contact = digits
     else:
         contact = raw_contact
-
     obj = object_label(answers)
     raw_location = answers.get("location_description") or answers.get("region") or "не указана"
     location = normalize_location(raw_location)
@@ -1155,7 +1281,6 @@ def build_form_payload(answers: dict, plan: dict):
     court_needed = "да" if answers.get("issue_type") in ("unauthorized_construction", "document_mismatch") else "нет"
     raw_problem = answers.get("raw_user_problem") or ""
     risk_level = "высокий" if any(word in raw_problem.lower() for word in ["снос", "нарушен", "самовольн"]) else "средний"
-
     summary = (
         f"Клиент сообщил о проблеме с {obj}.\n"
         f"Локация: {location}\n"
@@ -1169,7 +1294,6 @@ def build_form_payload(answers: dict, plan: dict):
         f"Уровень риска: {risk_level}\n"
         f"Дополнительно: {raw_problem}"
     )
-
     message = (
         f"Заявка из бота.\n"
         f"Проблема: {raw_problem}\n"
@@ -1190,7 +1314,6 @@ def build_form_payload(answers: dict, plan: dict):
         f"---\n"
         f"Человеко-читаемая сводка:\n{summary}"
     )
-
     return {
         "phone": contact,
         "message": message,
@@ -1200,258 +1323,195 @@ def build_form_payload(answers: dict, plan: dict):
         "consultation_mode": plan.get("consultation_mode") or "unknown",
     }
 
-
-def get_next_step(session: dict):
-    answers = session["answers"]
-
-    if not answers.get("raw_user_problem"):
-        return "raw_user_problem"
-
-    if not session["consultation_ready"]:
-        return "location_description"
-
-    if not answers.get("location_description"):
-        return "location_description"
-
-    if answers.get("cadastral_status") is None:
-        return "cadastral_number_optional"
-
-    if answers.get("land_rights_status") is None:
-        case_family = session.get("consultation_plan", {}).get("case_family", "unknown")
-        object_type = answers.get("object_type")
-        property_segment = answers.get("property_segment")
-
-        ask_for_land = False
-        if case_family.startswith("commercial_"):
-            ask_for_land = True
-        elif case_family in ("land_boundary_issue", "gas_connection_house", "residential_house_registration", "residential_dacha_registration"):
-            ask_for_land = True
-        elif object_type in ("warehouse", "production", "shop", "office", "building", "land_plot"):
-            ask_for_land = True
-        elif property_segment == "commercial":
-            ask_for_land = True
-
-        if ask_for_land:
-            return "land_rights"
-
-    if not answers.get("contact"):
-        return "contact"
-
-    return None
-
-
 @app.get("/health")
 def health():
     return {"ok": True}
-
 
 @app.post("/chat")
 async def chat(body: ChatRequest):
     user_message = body.message.strip()
     session_id = (body.session_id or "").strip()
-
     if not user_message:
         return JSONResponse(status_code=400, content={"error": "Empty message"})
-
     if not session_id:
         session_id = str(uuid.uuid4())
-
     if session_id not in sessions:
         sessions[session_id] = new_session()
-
     session = sessions[session_id]
-
     log_event("user_message", {
         "session_id": session_id,
         "message": user_message,
-        "state": session.get("state"),
-        "consultation_ready": session.get("consultation_ready")
+        "state": session.get("state")
     })
-
     if session.get("finished"):
         return {
             "session_id": session_id,
             "reply": {
                 "status": "final",
-                "final_message_for_user": "Вы уже оставили контакт. Юрист свяжется с вами в ближайшее время.",
+                "final_message_for_user": "Контакт уже получен. Следующий шаг — разбор документов по объекту.",
                 "form_payload": None,
             }
         }
-
     answers = session["answers"]
-
-    if session.get("nontarget_issued") and not session.get("consultation_ready"):
-        text_lower = user_message.lower()
-        strong_legal = ["банк", "росреестр", "залог", "отказ", "кредит", "экспертиз", "суд", "иск", "регистрац", "документ"]
-        if not any(w in text_lower for w in strong_legal):
-            session["clarification_attempts"] += 1
-            response = {
-                "status": "question",
-                "step": "raw_user_problem",
-                "message_for_user": "Я помогаю с юридическими вопросами по недвижимости: регистрация, узаконивание, кредит под залог, сделки. Если ваш вопрос об этом – уточните, пожалуйста, подробнее.",
-                "collected": {
-                    "raw_user_problem": answers.get("raw_user_problem"),
-                    "location_description": answers.get("location_description"),
-                    "contact": answers.get("contact"),
-                },
-            }
-            return {"session_id": session_id, "reply": response}
-
-    direct_contact, contact_type = detect_contact(user_message)
-    if direct_contact and not answers.get("contact"):
-        answers["contact"] = direct_contact
-        answers["contact_type"] = contact_type
-
-    cadastral_number, cadastral_status = detect_cadastral_status(user_message)
-    if cadastral_status and answers.get("cadastral_status") is None:
-        answers["cadastral_status"] = cadastral_status
-        if cadastral_number:
-            answers["cadastral_number"] = cadastral_number
-
-    if heuristic_location_detection(user_message) and not answers.get("location_description"):
-        answers["location_description"] = user_message
-
-    if not answers.get("land_rights_status") and user_message:
-        text_lower = user_message.lower()
-        if any(word in text_lower for word in ["собственность", "в собственности", "земля в собственности", "да собственность"]):
-            answers["land_rights_status"] = "owned"
-        elif any(word in text_lower for word in ["аренда", "в аренде"]):
-            answers["land_rights_status"] = "leased"
-        elif any(word in text_lower for word in ["нет документов", "не оформлена", "нет права"]):
-            answers["land_rights_status"] = "not_registered"
-
     try:
         extracted = extract_fields(user_message, answers)
-    except requests.RequestException as e:
-        return JSONResponse(status_code=502, content={"error": f"DeepSeek request failed: {str(e)}"})
-    except json.JSONDecodeError:
-        return JSONResponse(status_code=502, content={"error": "Model returned invalid JSON"})
     except Exception as e:
-        return JSONResponse(status_code=500, content={"error": f"Unexpected server error: {str(e)}"})
-
+        log_event("extract_error", {"error": str(e)})
+        extracted = {}
     answers = merge_answers(answers, extracted)
+    
+    last_question = (session.get("last_question") or "").lower()
+    if any(word in last_question for word in ["земель", "участок", "документы", "владеете", "правоустанавливающие"]):
+        user_lower = user_message.lower()
+        if any(word in user_lower for word in ["да", "+", "есть", "конечно", "имеется", "в собственности", "принадлежит", "собственность"]):
+            answers["land_rights_status"] = "owned"
+            log_event("heuristic_land", {"value": "owned", "trigger": user_message})
+        elif "нет" in user_lower:
+            answers["land_rights_status"] = "not_registered"
+            log_event("heuristic_land", {"value": "not_registered", "trigger": user_message})
+    
+    if "построен" in last_question or "когда" in last_question or "построй" in last_question:
+        time_words = ["пол года", "год", "месяц", "неделя", "дней", "202", "2023", "2024", "2025", "построен", "возведён", "сдан", "построили", "возвели"]
+        if any(word in user_message.lower() for word in time_words):
+            answers["construction_date"] = "известно"
+            log_event("heuristic_construction_date", {"value": "known", "trigger": user_message})
+    
     session["answers"] = answers
     session["history"].append({"user": user_message, "extracted": extracted})
-
     lead_category = classify_lead(answers)
     session["lead_category"] = lead_category
-
     if lead_category == "nontarget":
         if session["clarification_attempts"] < MAX_CLARIFICATION_ATTEMPTS:
             session["clarification_attempts"] += 1
             session["nontarget_issued"] = True
-            response = {
-                "status": "question",
-                "step": "raw_user_problem",
-                "message_for_user": "Я помогаю с юридическими вопросами по недвижимости: регистрация, узаконивание, кредит под залог, сделки. Если ваш вопрос об этом – уточните, пожалуйста, подробнее.",
-                "collected": {
-                    "raw_user_problem": answers.get("raw_user_problem"),
-                    "location_description": answers.get("location_description"),
-                    "contact": answers.get("contact"),
-                },
-            }
-            return {"session_id": session_id, "reply": response}
-
-        response = build_nontarget_response(answers)
-        return {"session_id": session_id, "reply": response}
-
-    if session.get("nontarget_issued"):
-        session["nontarget_issued"] = False
-
-    if not answers.get("raw_user_problem"):
-        answers["raw_user_problem"] = user_message
-
-    case_family = determine_case_family(answers)
-    plan = build_consultation_plan(case_family)
-    session["consultation_plan"] = plan
-
-    if not session["consultation_ready"]:
-        session["consultation_ready"] = True
-        session["state"] = "consultation"
-        reply_text = build_quick_expert_reply_v2(answers, plan)
-        log_event("bot_reply", {
-            "session_id": session_id,
-            "step": "location_description",
-            "reply_preview": reply_text[:200]
-        })
-        return {
-            "session_id": session_id,
-            "reply": build_question_response("location_description", answers, reply_text)
-        }
-
-    next_step = get_next_step(session)
-
-    if next_step:
-        attempts = session["step_attempts"].get(next_step, 0) + 1
-        session["step_attempts"][next_step] = attempts
-
-        if attempts > MAX_STEP_ATTEMPTS and next_step != "contact":
-            if next_step == "location_description":
-                answers["location_description"] = "Не указано"
-            elif next_step == "cadastral_number_optional":
-                answers["cadastral_status"] = "unknown"
-            elif next_step == "land_rights":
-                answers["land_rights_status"] = "unknown"
-
-            session["state"] = "request_contact"
             return {
                 "session_id": session_id,
                 "reply": build_question_response(
-                    "contact",
-                    answers,
-                    "Мы не смогли распознать некоторые данные. Пришлите, пожалуйста, телефон или Telegram для связи, и я передам заявку юристу."
+                    "Я помогаю с юридическими вопросами по недвижимости: регистрация, узаконивание, кредит под залог, сделки. Если ваш вопрос об этом – уточните, пожалуйста, подробнее.",
+                    session=session
                 )
             }
-
-        if next_step == "cadastral_number_optional":
-            session["state"] = "consultation"
+        response = build_nontarget_response(answers)
+        return {"session_id": session_id, "reply": response}
+    
+    if data_is_enough_for_full_analysis(answers):
+        case_family = determine_case_family(answers)
+        plan = build_consultation_plan(case_family)
+        session["consultation_plan"] = plan
+        response = build_final_response(answers, lead_category, plan)
+        if response.get("form_payload"):
+            send_email_lead(response["form_payload"])
+        log_lead({
+            "session_id": session_id,
+            "lead_category": response["lead_category"],
+            "case_family": response["lead_card"]["case_family"],
+            "object_type": response["lead_card"]["object_type"],
+            "issue_type": response["lead_card"]["issue_type"],
+            "location": response["lead_card"]["location_description"],
+            "contact": response["lead_card"]["contact"],
+            "summary": response["lead_card"].get("notes", ""),
+            "form_sent": True
+        })
+        session["finished"] = True
+        return {"session_id": session_id, "reply": response}
+    
+    if not session.get("preliminary_sent"):
+        plan_result = plan_next_step(answers, session["history"], force_finalize=user_signaled_no_more_info(user_message))
+        if plan_result.get("ready") and plan_result.get("message"):
+            session["preliminary_sent"] = True
             return {
                 "session_id": session_id,
-                "reply": build_question_response("cadastral_number_optional", answers)
+                "reply": {
+                    "status": "question",
+                    "message_for_user": plan_result["message"],
+                    "preliminary": True
+                }
             }
-
-        if next_step == "land_rights":
-            session["state"] = "consultation"
-            session["step_attempts"]["land_rights"] = session["step_attempts"].get("land_rights", 0) + 1
+        elif not plan_result.get("ready") and plan_result.get("message"):
             return {
                 "session_id": session_id,
-                "reply": build_question_response("land_rights", answers)
+                "reply": build_question_response(plan_result["message"], session=session)
             }
-
-        if next_step == "contact":
-            session["state"] = "request_contact"
+        else:
+            default_question = "Уточните, пожалуйста, где находится объект и в чём суть проблемы?"
             return {
                 "session_id": session_id,
-                "reply": build_question_response("contact", answers)
+                "reply": build_question_response(default_question, session=session)
             }
-
-        if next_step == "location_description":
-            session["state"] = "consultation"
-            return {
-                "session_id": session_id,
-                "reply": build_question_response("location_description", answers)
-            }
-
-    session["state"] = "final"
-    response = build_final_response(answers, classify_lead(answers), plan)
-    session["final_payload"] = response.get("form_payload") or {}
-
-    # Отправляем заявку на email через SMTP (вместо Formspree)
-    if response.get("form_payload"):
-        send_email_lead(response["form_payload"])
-
-    log_lead({
-        "session_id": session_id,
-        "lead_category": response["lead_category"],
-        "case_family": response["lead_card"]["case_family"],
-        "object_type": response["lead_card"]["object_type"],
-        "issue_type": response["lead_card"]["issue_type"],
-        "location": response["lead_card"]["location_description"],
-        "contact": response["lead_card"]["contact"],
-        "summary": response["lead_card"].get("notes", ""),
-        "form_sent": True
-    })
-
-    session["finished"] = True
-
-    return {"session_id": session_id, "reply": response}
+    else:
+        if not answers.get("contact"):
+            contact, ctype = detect_contact(user_message)
+            if contact:
+                answers["contact"] = contact
+                answers["contact_type"] = ctype
+                session["answers"] = answers
+                if data_is_enough_for_full_analysis(answers):
+                    case_family = determine_case_family(answers)
+                    plan = build_consultation_plan(case_family)
+                    session["consultation_plan"] = plan
+                    response = build_final_response(answers, lead_category, plan)
+                    if response.get("form_payload"):
+                        send_email_lead(response["form_payload"])
+                    log_lead({
+                        "session_id": session_id,
+                        "lead_category": response["lead_category"],
+                        "case_family": response["lead_card"]["case_family"],
+                        "object_type": response["lead_card"]["object_type"],
+                        "issue_type": response["lead_card"]["issue_type"],
+                        "location": response["lead_card"]["location_description"],
+                        "contact": response["lead_card"]["contact"],
+                        "summary": response["lead_card"].get("notes", ""),
+                        "form_sent": True
+                    })
+                    session["finished"] = True
+                    return {"session_id": session_id, "reply": response}
+                else:
+                    if session.get("consultation_plan", {}).get("case_family"):
+                        plan = session["consultation_plan"]
+                    else:
+                        case_family = determine_case_family(answers)
+                        plan = build_consultation_plan(case_family)
+                        session["consultation_plan"] = plan
+                    next_request = build_next_document_request(answers, plan)
+                    return {
+                        "session_id": session_id,
+                        "reply": build_question_response(next_request, session=session)
+                    }
+            else:
+                return {
+                    "session_id": session_id,
+                    "reply": build_question_response(QUESTION_TEXTS["contact"], session=session)
+                }
+        else:
+            if data_is_enough_for_full_analysis(answers):
+                case_family = determine_case_family(answers)
+                plan = build_consultation_plan(case_family)
+                session["consultation_plan"] = plan
+                response = build_final_response(answers, lead_category, plan)
+                if response.get("form_payload"):
+                    send_email_lead(response["form_payload"])
+                log_lead({
+                    "session_id": session_id,
+                    "lead_category": response["lead_category"],
+                    "case_family": response["lead_card"]["case_family"],
+                    "object_type": response["lead_card"]["object_type"],
+                    "issue_type": response["lead_card"]["issue_type"],
+                    "location": response["lead_card"]["location_description"],
+                    "contact": response["lead_card"]["contact"],
+                    "summary": response["lead_card"].get("notes", ""),
+                    "form_sent": True
+                })
+                session["finished"] = True
+                return {"session_id": session_id, "reply": response}
+            else:
+                if session.get("consultation_plan", {}).get("case_family"):
+                    plan = session["consultation_plan"]
+                else:
+                    case_family = determine_case_family(answers)
+                    plan = build_consultation_plan(case_family)
+                    session["consultation_plan"] = plan
+                next_request = build_next_document_request(answers, plan)
+                return {
+                    "session_id": session_id,
+                    "reply": build_question_response(next_request, session=session)
+                }
